@@ -76,6 +76,13 @@ int main()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
+    // Read native video FPS for correct playback speed
+    double video_fps = cap.get(cv::CAP_PROP_FPS);
+    if (video_fps <= 0) video_fps = 30.0;
+    double frame_time_ms = 1000.0 / video_fps;
+
+    std::cout << "Video FPS: " << video_fps << " (" << frame_time_ms << " ms/frame)\n";
+
     // Pre-allocate pinned host memory for output (avoids alloc every frame)
     float* h_output = nullptr;
     cudaMallocHost(&h_output, output_elements * sizeof(float));
@@ -86,6 +93,11 @@ int main()
     // Set tensor addresses once (they don't change between frames)
     context->setTensorAddress(input_name, d_input);
     context->setTensorAddress(output_name, d_output);
+
+    // Absolute frame pacing: track when each frame should be displayed
+    auto next_frame_time = std::chrono::high_resolution_clock::now();
+    auto frame_interval = std::chrono::duration_cast<std::chrono::high_resolution_clock::duration>(
+        std::chrono::duration<double>(1.0 / video_fps));
 
     while (true) {
         cap >> frame;
@@ -140,7 +152,18 @@ int main()
         drawInfo(frame, fps, detections.size());
 
         cv::imshow("YOLO26n TensorRT Inference", frame);
-        if (cv::waitKey(1) == 'q') break;   
+
+        // Absolute frame pacing: wait until the target time for this frame
+        next_frame_time += frame_interval;
+        auto now = std::chrono::high_resolution_clock::now();
+        int wait_ms = std::max(1, static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(next_frame_time - now).count()));
+        if (cv::waitKey(wait_ms) == 'q') break;
+
+        // If we fell behind, reset the pacer to avoid a burst of catch-up frames
+        if (std::chrono::high_resolution_clock::now() > next_frame_time + frame_interval) {
+            next_frame_time = std::chrono::high_resolution_clock::now();
+        }
     }
 
     // Cleanup
