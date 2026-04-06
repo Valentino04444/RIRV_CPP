@@ -1,8 +1,13 @@
 cmake_minimum_required(VERSION 3.18)
-project(VideoTensorRT LANGUAGES CXX)
+
+set(CMAKE_CUDA_COMPILER /usr/local/cuda/bin/nvcc)
+project(VideoTensorRT LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_ARCHITECTURES 75)
 set(CMAKE_BUILD_TYPE Release)
 
 # --- OpenCV ---
@@ -37,6 +42,7 @@ add_executable(video_inference
     src/preprocessing.cpp
     src/postprocessing.cpp
     src/renderer.cpp
+    src/preprocessing_gpu.cu
 )
 
 # Link libraries

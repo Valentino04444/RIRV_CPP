@@ -11,7 +11,7 @@
 
 #include "logger.h"
 #include "types.h"
-#include "preprocessing.h"
+#include "preprocessing_gpu.h"
 #include "postprocessing.h"
 #include "renderer.h"
 
@@ -76,6 +76,17 @@ int main()
     cudaStream_t stream;
     cudaStreamCreate(&stream);
 
+    // Pre-allocate pinned host memory for output (avoids alloc every frame)
+    float* h_output = nullptr;
+    cudaMallocHost(&h_output, output_elements * sizeof(float));
+
+    // GPU preprocessing buffers (allocated on first frame)
+    GpuPreprocessBuffers gpu_buf = {};
+
+    // Set tensor addresses once (they don't change between frames)
+    context->setTensorAddress(input_name, d_input);
+    context->setTensorAddress(output_name, d_output);
+
     while (true) {
         cap >> frame;
         frame_count++;
@@ -87,31 +98,27 @@ int main()
         int orig_h = frame.rows;
         int orig_w = frame.cols;
 
-        cv::Mat letterboxed = letterbox(frame, 640);
-        std::vector<float> input_tensor = preprocessImage(letterboxed);
+        // Allocate GPU buffers on first frame (now we know dimensions)
+        if (!gpu_buf.d_frame) {
+            initGpuPreprocessBuffers(gpu_buf, orig_w, orig_h);
+        }
 
-        // Copy input to GPU
-        cudaMemcpyAsync(d_input, input_tensor.data(), input_tensor.size() * sizeof(float),
-                        cudaMemcpyHostToDevice, stream);
+        // GPU preprocessing: upload raw BGR → letterbox+RGB+normalize+CHW → d_input
+        preprocessGpu(frame.data, orig_w, orig_h, gpu_buf,
+                      static_cast<float*>(d_input), 640, stream);
 
-        // Set tensors (TensorRT 10+ style)
-        context->setTensorAddress(input_name, d_input);
-        context->setTensorAddress(output_name, d_output);
-
-        // Run inference
+        // Run inference (preprocessGpu already enqueued async work on same stream)
         if (!context->enqueueV3(stream)) {
             std::cerr << "enqueueV3 failed on frame " << frame_count << std::endl;
         }
-        cudaStreamSynchronize(stream);
 
-        // Copy output back
-        std::vector<float> output_tensor(output_elements);
-        cudaMemcpyAsync(output_tensor.data(), d_output, output_elements * sizeof(float),
+        // Copy output back to pinned host memory — single sync covers everything
+        cudaMemcpyAsync(h_output, d_output, output_elements * sizeof(float),
                         cudaMemcpyDeviceToHost, stream);
         cudaStreamSynchronize(stream);
 
         // Parse output: [1, 300, 6] → xyxy, conf, class_id  (already NMS'ed)
-        std::vector<Detection> detections = parseDetections(output_tensor.data(), 300, orig_w, orig_h);
+        std::vector<Detection> detections = parseDetections(h_output, 300, orig_w, orig_h);
 
         // Draw detections and overlay info
         drawDetections(frame, detections);
@@ -137,6 +144,8 @@ int main()
     }
 
     // Cleanup
+    freeGpuPreprocessBuffers(gpu_buf);
+    cudaFreeHost(h_output);
     cudaFree(d_input);
     cudaFree(d_output);
     cudaStreamDestroy(stream);
